@@ -1,6 +1,5 @@
 #pragma once
 
-
 #ifndef __PROTECT__PROCESS
 #define __PROTECT__PROCESS
 
@@ -9,10 +8,26 @@
 #include <tchar.h>
 #include <psapi.h>
 
+#include <vector>
+#include <map>
+
+// https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/596a1078-e883-4972-9bbc-49e60bebca55
+const DWORD STATUS_SUCCESS = 0x00000000;
+const DWORD STATUS_INFO_LENGTH_MISMATCH = 0xC0000004;
+
+
+typedef struct _handleData {
+    USHORT handle;
+    DWORD typeNumber;
+} handleData;
+
+std::vector<handleData> vHandle;
+std::map<DWORD, std::vector<handleData>> handleMap;
+
 
 namespace ProtectProcess {
 
-    #pragma region API and Flags
+#pragma region API and Flags
     const DWORD SystemHandleInformation = 0x10;
     const DWORD STATUS_INFO_LENGTH_MISMATCH = 0xC0000004L;
 
@@ -110,12 +125,13 @@ namespace ProtectProcess {
 
 #pragma endregion
 
-    fZwQuerySystemInformation ZwQuerySystemInformation;
-
+   
 
     void EnableSystemPriv(void);
     unsigned int __stdcall ThreadFunction(PVOID pData);
+    BOOL IsElevated();
     bool isRun;
+
 
     void Start() {
         EnableSystemPriv();
@@ -123,6 +139,7 @@ namespace ProtectProcess {
         int val = 10;
         DWORD dwThreadID;
         HANDLE m_Thread = (HANDLE)_beginthreadex(NULL, NULL, ThreadFunction, &val, 0, (unsigned int*)&dwThreadID);
+
         if (m_Thread) {
             CloseHandle(m_Thread);
         }
@@ -133,106 +150,141 @@ namespace ProtectProcess {
     }
 
 
-    // ¿Ã¬ ¿∏∑Œ ≥—æÓø»
-    // return true «œ∏È ¬˜¥‹
-    // return false «œ∏È ¬˜¥‹æ»«‘
+    // Ïù¥Ï™ΩÏúºÎ°ú ÎÑòÏñ¥Ïò¥
+    // return true ÌïòÎ©¥ Ï∞®Îã®
+    // return false ÌïòÎ©¥ Ï∞®Îã®ÏïàÌï®
     bool checkClose(HANDLE hProcess, ULONG pid) {
-        TCHAR Buffer[260] = { 0, };
-        GetModuleFileNameEx(hProcess, NULL, Buffer, _countof(Buffer));
-        printf("PID: %d  FilePath: %ws\n", pid, Buffer);
+        char Buffer[260] = { 0, };
+        GetModuleFileNameExA(hProcess, NULL, Buffer, _countof(Buffer));
+        printf("PID: %d  FilePath: %s\n", pid, Buffer);
+
+        // ExitProcess(0);
         return true;
     }
 
 
     unsigned int __stdcall ThreadFunction(PVOID pData) {
-       
-        ZwQuerySystemInformation = (fZwQuerySystemInformation)GetProcAddress(LoadLibrary(_T("ntdll.dll")), "ZwQuerySystemInformation");
-        fZwQueryObject ZwQueryObject = (fZwQueryObject)GetProcAddress(LoadLibrary(_T("ntdll.dll")), "ZwQueryObject");
-        fZwQueryInformationProcess ZwQueryInformationProcess = (fZwQueryInformationProcess)GetProcAddress(LoadLibrary(_T("ntdll.dll")),
-            "ZwQueryInformationProcess");
 
+        fZwQuerySystemInformation ZwQuerySystemInformation = (fZwQuerySystemInformation)GetProcAddress(LoadLibraryW(L"ntdll.dll"), "ZwQuerySystemInformation");
+        fZwQueryObject ZwQueryObject = (fZwQueryObject)GetProcAddress(LoadLibraryW(L"ntdll.dll"), "ZwQueryObject");
+        fZwQueryInformationProcess ZwQueryInformationProcess = (fZwQueryInformationProcess)GetProcAddress(LoadLibraryW(L"ntdll.dll"), "ZwQueryInformationProcess");
         DWORD CurrentProcessId = GetCurrentProcessId();
-
 
         isRun = true;
         while (isRun) {
+
             LPBYTE Memory = new BYTE[1000];
             DWORD MemorySize = 1000;
- 
+
             DWORD dwReturnSize = 0;
             DWORD Status;
 
-            while (true)
-            {
+            while(1) {
                 Status = ZwQuerySystemInformation(SystemHandleInformation, Memory, MemorySize, &dwReturnSize);
-                if (Status == 0) {
-                    break;
+                if (Status == STATUS_SUCCESS) break;
+                    
+                if (Status == STATUS_INFO_LENGTH_MISMATCH) {
+                    delete[] Memory;
+                    Memory = new BYTE[dwReturnSize];
+                    MemorySize = dwReturnSize;
                 }
-
-                delete[] Memory;
-                Memory = new BYTE[dwReturnSize];
-                MemorySize = dwReturnSize;
+                else {
+                    // other error
+                    printf("ZwQuerySystemInformation Error : %08X\n", Status);
+                    return 1;
+                }
             }
-            
+
             PSYSTEM_EXTENDED_HANDLE_INFORMATION pInformation = (PSYSTEM_EXTENDED_HANDLE_INFORMATION)Memory;
+
+            handleMap.clear();
             for (ULONG i = 0; i < pInformation->NumberOfHandles; i++) {
-                // «ÿ¥Á «⁄µÈ¿ª ∞°¡¯ PID ∞° ≥™∂Û∏È ∆–Ω∫
+                // Ìï¥Îãπ Ìï∏Îì§ÏùÑ Í∞ÄÏßÑ PID Í∞Ä ÎÇòÎùºÎ©¥ Ìå®Ïä§
                 if (pInformation->Handles[i].UniqueProcessId == CurrentProcessId)
                     continue;
 
-                // (ULONG)CurrentProcessId
+                handleData obj;
+                obj.handle = pInformation->Handles[i].Handle;
+                obj.typeNumber = pInformation->Handles[i].ObjectTypeNumber;
 
-                // MAXIMUM_ALLOWED | PROCESS_QUERY_INFORMATION | PROCESS_DUP_HANDLE
-                HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_DUP_HANDLE, false, pInformation->Handles[i].UniqueProcessId);
-                if (!hProcess) {
-                    continue;
+                std::map<DWORD, std::vector<handleData>>::iterator iter;
+                iter = handleMap.find(pInformation->Handles[i].UniqueProcessId);
+                if (iter == handleMap.end())
+                {
+                    // not found
+                    std::vector<handleData> data;
+                    data.push_back(obj);
+                    handleMap.insert(std::pair<DWORD, std::vector<handleData>>(pInformation->Handles[i].UniqueProcessId, data));
+                }
+                else {
+                    // found
+                    iter->second.push_back(obj);
                 }
 
-                BYTE Buffer[260] = { 0, };
-                DWORD dwObjectResult;
-
-                HANDLE copyHandle = nullptr; // ∫πªÁµ…«⁄µÈ
-                bool s = DuplicateHandle(hProcess, (HANDLE)pInformation->Handles[i].Handle, GetCurrentProcess(),
-                    &copyHandle, MAXIMUM_ALLOWED, false, DUPLICATE_SAME_ACCESS);
-                // DUPLICATE_CLOSE_SOURCE DUPLICATE_SAME_ACCESS
-                if (!s) {
-                    // «⁄µÈ∫π¡¶Ω«∆–
-                    CloseHandle(hProcess);
-                    continue;
-                }
-                ZwQueryObject(copyHandle, ObjectTypeInformation, Buffer, sizeof(Buffer), &dwObjectResult);
-
-
-                PPUBLIC_OBJECT_TYPE_INFORMATION pType = (PPUBLIC_OBJECT_TYPE_INFORMATION)Buffer;
-
-                if (pType->TypeName.Buffer && _tcscmp(pType->TypeName.Buffer, _T("Process")) == 0) {
-                    // GetHandleInformation  ∏¶ ªÁøÎ«œ∏È ªÛº”µ» «⁄µÈ¿Ã≥™ ∫∏»£µ» «⁄µÈ¿ª æÀºˆ¿÷¿Ω
-                    // C0000004
-
-                    PROCESS_BASIC_INFORMATION PBI = { 0, };
-                    DWORD dwBufferSize = 8000;
-                    DWORD dwLength = 8000;
-
-           
-                    DWORD status1 = ZwQueryInformationProcess(copyHandle, ProcessBasicInformation, &PBI, sizeof(PBI), &dwLength);
-                    if (PBI.UniqueProcessId == CurrentProcessId) {
-                        // printf("Detect Process ID : %d\n", pInformation->Handles[i].UniqueProcessId);
-                        
-                        if (checkClose(hProcess, pInformation->Handles[i].UniqueProcessId)) {
-                            CloseHandle(copyHandle);
-                            DuplicateHandle(hProcess, (HANDLE)pInformation->Handles[i].Handle, GetCurrentProcess(),
-                                &copyHandle, MAXIMUM_ALLOWED, false, DUPLICATE_CLOSE_SOURCE);
-                            CloseHandle(copyHandle);
-                        }
-                    }
-                }
-       
-                CloseHandle(copyHandle);
-                CloseHandle(hProcess);
             }
 
-
             
+            std::map<DWORD, std::vector<handleData>>::iterator iter = handleMap.begin();
+            DWORD processObject = -1;
+
+            while (iter != handleMap.end()) {
+
+                DWORD dwProcessID = iter->first;
+
+                HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_DUP_HANDLE, false, dwProcessID);
+                if (hProcess) {
+
+                    for (std::vector<handleData>::iterator iterData = iter->second.begin(); iterData != iter->second.end(); iterData++)
+                    {
+                        // Process Type ÏùÑ ÏñªÏñ¥ÏôîÍ≥†
+                        if (processObject != -1 && processObject != iterData->typeNumber) {
+                            continue;
+                        }
+
+                        BYTE Buffer[260] = { 0, };
+                        DWORD dwObjectResult;
+
+                        HANDLE copyHandle = nullptr; // Î≥µÏÇ¨Îê†Ìï∏Îì§
+                        bool s = DuplicateHandle(hProcess, (HANDLE)iterData->handle, GetCurrentProcess(),
+                            &copyHandle, MAXIMUM_ALLOWED, false, DUPLICATE_SAME_ACCESS);
+                        // DUPLICATE_CLOSE_SOURCE DUPLICATE_SAME_ACCESS
+                        if (!s) {
+                            // Ìï∏Îì§Î≥µÏ†úÏã§Ìå®
+                            continue;
+                        }
+                        ZwQueryObject(copyHandle, ObjectTypeInformation, Buffer, sizeof(Buffer), &dwObjectResult);
+                        PPUBLIC_OBJECT_TYPE_INFORMATION pType = (PPUBLIC_OBJECT_TYPE_INFORMATION)Buffer;
+
+                        if (pType->TypeName.Buffer && wcscmp(pType->TypeName.Buffer, L"Process") == 0) {
+                            processObject = iterData->typeNumber;
+                            // GetHandleInformation  Î•º ÏÇ¨Ïö©ÌïòÎ©¥ ÏÉÅÏÜçÎêú Ìï∏Îì§Ïù¥ÎÇò Î≥¥Ìò∏Îêú Ìï∏Îì§ÏùÑ ÏïåÏàòÏûàÏùå
+                            PROCESS_BASIC_INFORMATION PBI = { 0, };
+                            DWORD dwBufferSize = 8000;
+                            DWORD dwLength = 8000;
+
+
+                            DWORD status1 = ZwQueryInformationProcess(copyHandle, ProcessBasicInformation, &PBI, sizeof(PBI), &dwLength);
+                            if (PBI.UniqueProcessId == CurrentProcessId) {
+                                // printf("Detect Process ID : %d\n", pInformation->Handles[i].UniqueProcessId);
+                                if (checkClose(hProcess, dwProcessID)) {
+                                    CloseHandle(copyHandle);
+                                    DuplicateHandle(hProcess, (HANDLE)iterData->handle, GetCurrentProcess(),
+                                        &copyHandle, MAXIMUM_ALLOWED, false, DUPLICATE_CLOSE_SOURCE);
+                                }
+
+                                CloseHandle(copyHandle);
+                            }
+
+                        }
+
+                    }
+
+                    CloseHandle(hProcess);
+                    hProcess = NULL;
+                }
+
+                iter++;
+            }
 
             delete[] Memory;
             Sleep(10);
@@ -264,6 +316,23 @@ namespace ProtectProcess {
         }
         CloseHandle(hToken);
     }
+
+    BOOL IsElevated() {
+        BOOL fRet = FALSE;
+        HANDLE hToken = NULL;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+            TOKEN_ELEVATION Elevation;
+            DWORD cbSize = sizeof(TOKEN_ELEVATION);
+            if (GetTokenInformation(hToken, TokenElevation, &Elevation, sizeof(Elevation), &cbSize)) {
+                fRet = Elevation.TokenIsElevated;
+            }
+        }
+        if (hToken) {
+            CloseHandle(hToken);
+        }
+        return fRet;
+    }
+
 };
 
 
