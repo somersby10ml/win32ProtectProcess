@@ -1,3 +1,7 @@
+# 2021-11-16
+
+Detect debug mode and close handle
+
 # Windows Protect Process
 
 UserMode and KernelMode Simple SourceCode
