@@ -1,4 +1,3 @@
-#include <wdm.h>
 #include "hook.h"
 
 // My Driver Name
@@ -41,7 +40,7 @@ NTSTATUS Function_IRP_DEVICE_CONTROL(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
     PIO_STACK_LOCATION pIoStackLocation;
     pIoStackLocation = IoGetCurrentIrpStackLocation(Irp);
 
-    
+
     switch (pIoStackLocation->Parameters.DeviceIoControl.IoControlCode)
     {
     case IOCTL_PROTECT:
@@ -55,7 +54,7 @@ NTSTATUS Function_IRP_DEVICE_CONTROL(PDEVICE_OBJECT pDeviceObject, PIRP Irp)
         break;
     }
     case IOCTL_UNPROTECT:
-        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_TRACE_LEVEL, "IOCTL_UNPROTECT");
+        DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_TRACE_LEVEL, "[ProtectProcess] IOCTL_UNPROTECT");
         setProcessId(0);
         break;
     }
@@ -81,15 +80,18 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObject, IN PUNICODE_STRING pRegist
     UNREFERENCED_PARAMETER(pDriverObject);
     UNREFERENCED_PARAMETER(pRegistryPath);
 
-    //DbgPrint("DbgPrint DriverEntry");
-    //DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "DbgPrintEx DriverEntry\n");
+    DbgPrint("DbgPrint DriverEntry");
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL, "[ProtectProcess] DbgPrintEx DriverEntry\n");
 
     NTSTATUS ntStatus = 0;
-    UNICODE_STRING deviceNameUnicodeString, deviceSymLinkUnicodeString;
+    UNICODE_STRING deviceNameUnicodeString, deviceSymLinkUnicodeString, PsGetProcessDebugPortString;
 
     // Normalize name and symbolic link.
     RtlInitUnicodeString(&deviceNameUnicodeString, deviceNameBuffer);
-    RtlInitUnicodeString(&deviceSymLinkUnicodeString,deviceSymLinkBuffer);
+    RtlInitUnicodeString(&deviceSymLinkUnicodeString, deviceSymLinkBuffer);
+
+    RtlCreateUnicodeString(&PsGetProcessDebugPortString, L"PsGetProcessDebugPort");
+    PsGetProcessDebugPort = (PsGetProcessDebugPort_t)MmGetSystemRoutineAddress(&PsGetProcessDebugPortString);
 
     // Create the device.
     ntStatus = IoCreateDevice(pDriverObject,
@@ -101,14 +103,18 @@ NTSTATUS DriverEntry(IN PDRIVER_OBJECT pDriverObject, IN PUNICODE_STRING pRegist
         &g_MyDevice);
 
     // Create the symbolic link
-    ntStatus = IoCreateSymbolicLink(&deviceSymLinkUnicodeString,&deviceNameUnicodeString);
+    ntStatus = IoCreateSymbolicLink(&deviceSymLinkUnicodeString, &deviceNameUnicodeString);
 
-    testHook();
+    if (testHook() == STATUS_SUCCESS)
+    {
+        //TODO
+    }
 
     pDriverObject->DriverUnload = OnUnload;
     pDriverObject->MajorFunction[IRP_MJ_CREATE] = Function_IRP_MJ_CREATE;
     pDriverObject->MajorFunction[IRP_MJ_CLOSE] = Function_IRP_MJ_CLOSE;
     pDriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = Function_IRP_DEVICE_CONTROL;
-    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_TRACE_LEVEL, "Driver Load\n");
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_TRACE_LEVEL, "[ProtectProcess] Driver Load\n");
+
     return STATUS_SUCCESS;
 }
